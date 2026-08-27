@@ -194,7 +194,42 @@
     if (lastMotionTs != null) body.timestamp_motion = lastMotionTs;
     var ang = screenAngle();
     if (ang != null) body.screen_orientation_deg = ang;
+    stampCamera(body);
     return body;
+  }
+
+  function hashDeviceId(id) {
+    if (typeof id !== "string" || !id) return null;
+    var bytes = new TextEncoder().encode(id);
+    var hex = (crc32(bytes) >>> 0).toString(16);
+    while (hex.length < 8) hex = "0" + hex;
+    return hex;
+  }
+
+  function stampCamera(body) {
+    if (video && video.videoWidth) body.videoWidth = video.videoWidth;
+    if (video && video.videoHeight) body.videoHeight = video.videoHeight;
+    var track = null;
+    if (stream && stream.getVideoTracks) {
+      var tracks = stream.getVideoTracks();
+      if (tracks && tracks.length) track = tracks[0];
+    }
+    if (!track || typeof track.getSettings !== "function") return;
+    var s;
+    try {
+      s = track.getSettings() || {};
+    } catch (err) {
+      return;
+    }
+    var settings = {};
+    if (typeof s.width === "number" && isFinite(s.width)) settings.width = s.width;
+    if (typeof s.height === "number" && isFinite(s.height)) settings.height = s.height;
+    if (typeof s.facingMode === "string" && s.facingMode) settings.facingMode = s.facingMode;
+    if (typeof s.aspectRatio === "number" && isFinite(s.aspectRatio)) settings.aspectRatio = s.aspectRatio;
+    if (typeof s.zoom === "number" && isFinite(s.zoom)) settings.zoom = s.zoom;
+    var hid = hashDeviceId(s.deviceId);
+    if (hid) settings.deviceId_hash = hid;
+    body.mediaTrackSettings = settings;
   }
 
   function canvasBlob() {
