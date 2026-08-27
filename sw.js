@@ -1,5 +1,5 @@
 /* SkyNav capture-web — cache this app's static files only. */
-const CACHE = "skynav-capture-web-v4";
+const CACHE = "skynav-capture-web-v5";
 const ASSETS = [
   "./",
   "./index.html",

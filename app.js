@@ -45,6 +45,11 @@
   var lastName = "";
   var nightOn = false;
   var lastExposureAttempt = null;
+  var lastCameraLock = {
+    attempt: "unknown",
+    enumerate_count: 0,
+    labelHash: null,
+  };
 
   function setStatus(text, kind) {
     statusEl.textContent = text;
@@ -146,27 +151,191 @@
     window.addEventListener("devicemotion", onMotion, { passive: true });
   }
 
-  function videoConstraints() {
+  function videoConstraints(extra) {
+    extra = extra || {};
     var c = {
-      facingMode: { ideal: "environment" },
+      facingMode: extra.facingExact ? { exact: "environment" } : { ideal: "environment" },
       width: { ideal: 1920 },
       height: { ideal: 1440 },
     };
+    if (extra.deviceId) c.deviceId = { exact: extra.deviceId };
     if (nightOn) c.frameRate = { ideal: 10, max: 24 };
     return c;
+  }
+
+  function stopStream() {
+    if (!stream) return;
+    var tracks = stream.getTracks ? stream.getTracks() : [];
+    for (var i = 0; i < tracks.length; i++) {
+      try {
+        tracks[i].stop();
+      } catch (err) {}
+    }
+    stream = null;
+    if (video) video.srcObject = null;
+  }
+
+  async function attachStream(s) {
+    stream = s;
+    video.srcObject = stream;
+    await video.play();
+    blank.classList.add("hidden");
+  }
+
+  async function openVideo(extra) {
+    var s = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: videoConstraints(extra),
+    });
+    await attachStream(s);
+    return s;
+  }
+
+  function normLabel(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/[-_./]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function labelKind(label) {
+    var n = normLabel(label);
+    if (!n) return "empty";
+    if (/\bfront\b|\buser\b|\bselfie\b|קדמית|frontal|delantera/.test(n)) return "front";
+    if (
+      /ultra\s*wide|ultrawide|\bultra\b|אולטרה|רחב במיוחד|надширок|ultra grand|ultra weit/.test(n)
+    ) {
+      return "ultrawide";
+    }
+    if (/\btele\b|telephoto|טלפוטו/.test(n)) return "tele";
+    if (/\bdual\b|\btriple\b|desk view|כפולה|משולשת/.test(n)) return "virtual";
+    if (/\bback\b|\brear\b|\benvironment\b|אחורית|traseira|trasera|rückkamera|arrière/.test(n)) {
+      return "main";
+    }
+    return "other";
+  }
+
+  function pickPreferred(videos) {
+    var main = null;
+    var virtual = null;
+    var i;
+    var k;
+    for (i = 0; i < videos.length; i++) {
+      k = labelKind(videos[i].label);
+      if (k === "main" && !main) main = videos[i];
+      if (k === "virtual" && !virtual) virtual = videos[i];
+    }
+    if (main) return { device: main, attempt: "main", kind: "main" };
+    if (virtual) return { device: virtual, attempt: "environment", kind: "virtual" };
+    return null;
+  }
+
+  async function listVideoInputs() {
+    if (!navigator.mediaDevices.enumerateDevices) return [];
+    var all = await navigator.mediaDevices.enumerateDevices();
+    var out = [];
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].kind === "videoinput") out.push(all[i]);
+    }
+    return out;
+  }
+
+  function currentDeviceId() {
+    var track = getTrack();
+    if (!track || typeof track.getSettings !== "function") return null;
+    try {
+      var s = track.getSettings() || {};
+      return typeof s.deviceId === "string" && s.deviceId ? s.deviceId : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  async function applyWideZoom(kind) {
+    var track = getTrack();
+    if (!track || typeof track.applyConstraints !== "function") return;
+    var caps = {};
+    if (typeof track.getCapabilities === "function") {
+      try {
+        caps = track.getCapabilities() || {};
+      } catch (err) {}
+    }
+    var z = caps.zoom;
+    var supported = supportedConstraints();
+    if (!(z && typeof z === "object") && !supported.zoom) return;
+    var min = z && typeof z.min === "number" && isFinite(z.min) ? z.min : 1;
+    var max = z && typeof z.max === "number" && isFinite(z.max) ? z.max : 2;
+    var want;
+    if (kind === "main") {
+      want = 1;
+    } else if (max >= 2) {
+      want = 2;
+    } else {
+      want = 1;
+    }
+    if (want < 1) return;
+    if (want < min) want = min;
+    if (want > max) want = max;
+    if (want < 1) return;
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: want }] });
+    } catch (err1) {
+      try {
+        await track.applyConstraints({ zoom: want });
+      } catch (err2) {}
+    }
   }
 
   async function requestCamera() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error("getUserMedia missing");
     }
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: videoConstraints(),
-    });
-    video.srcObject = stream;
-    await video.play();
-    blank.classList.add("hidden");
+    lastCameraLock = { attempt: "unknown", enumerate_count: 0, labelHash: null };
+
+    await openVideo(null);
+
+    var videos = [];
+    try {
+      videos = await listVideoInputs();
+    } catch (err) {
+      videos = [];
+    }
+    lastCameraLock.enumerate_count = videos.length;
+
+    var pick = pickPreferred(videos);
+    var curId = currentDeviceId();
+
+    if (pick && pick.device && pick.device.deviceId) {
+      lastCameraLock.attempt = pick.attempt;
+      lastCameraLock.labelHash = hashDeviceId(pick.device.label);
+      if (pick.device.deviceId !== curId) {
+        try {
+          stopStream();
+          await openVideo({ deviceId: pick.device.deviceId, facingExact: true });
+        } catch (errExact) {
+          try {
+            stopStream();
+            await openVideo({ deviceId: pick.device.deviceId, facingExact: false });
+          } catch (errId) {
+            stopStream();
+            await openVideo(null);
+            lastCameraLock.attempt = videos.length ? "environment" : "unknown";
+          }
+        }
+      }
+    } else {
+      lastCameraLock.attempt = videos.length ? "environment" : "unknown";
+      var t = getTrack();
+      if (t && typeof t.applyConstraints === "function") {
+        try {
+          await t.applyConstraints({ facingMode: { exact: "environment" } });
+        } catch (err) {}
+      }
+    }
+
+    var kind = pick && pick.kind ? pick.kind : "unknown";
+    await applyWideZoom(kind);
     if (nightOn) await applyNightConstraints();
   }
 
@@ -326,8 +495,11 @@
       await requestCamera();
       shutterBtn.disabled = false;
       enableBtn.hidden = true;
+      var lockLine = "lock " + lastCameraLock.attempt + " · n=" + lastCameraLock.enumerate_count;
       setStatus(
-        nightOn ? "Camera on. לילה ×" + STACK_N + ". Hold still, then shutter." : "Camera on. Hold still, then shutter.",
+        nightOn
+          ? "Camera on. " + lockLine + ". לילה ×" + STACK_N + ". Hold still, then shutter."
+          : "Camera on. " + lockLine + ". Hold still, then shutter.",
         ""
       );
     } catch (err) {
@@ -406,14 +578,27 @@
   }
 
   function stampCamera(body) {
+    body.camera_lock_attempt = lastCameraLock.attempt || "unknown";
+    if (typeof lastCameraLock.enumerate_count === "number") {
+      body.enumerate_count = lastCameraLock.enumerate_count;
+    }
     if (video && video.videoWidth) body.videoWidth = video.videoWidth;
     if (video && video.videoHeight) body.videoHeight = video.videoHeight;
     var track = getTrack();
-    if (!track || typeof track.getSettings !== "function") return;
+    var label = "";
+    if (track && typeof track.label === "string") label = track.label;
+    var lhash = hashDeviceId(label) || lastCameraLock.labelHash;
+    if (!track || typeof track.getSettings !== "function") {
+      if (lhash) {
+        body.mediaTrackSettings = { deviceLabel_hash: lhash };
+      }
+      return;
+    }
     var s;
     try {
       s = track.getSettings() || {};
     } catch (err) {
+      if (lhash) body.mediaTrackSettings = { deviceLabel_hash: lhash };
       return;
     }
     var settings = {};
@@ -425,6 +610,7 @@
     if (typeof s.frameRate === "number" && isFinite(s.frameRate)) settings.frameRate = s.frameRate;
     var hid = hashDeviceId(s.deviceId);
     if (hid) settings.deviceId_hash = hid;
+    if (lhash) settings.deviceLabel_hash = lhash;
     body.mediaTrackSettings = settings;
   }
 
