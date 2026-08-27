@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0b0c0f">
+  <title>SkyNav Capture</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icon-180.png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="stage">
+    <video id="preview" playsinline muted autoplay></video>
+    <div id="blank">SkyNav Capture<br>Camera + DeviceMotionEvent<br>אין מפה · אין קואורדינטות</div>
+  </div>
+  <div id="chrome">
+    <div id="top">
+      <div id="title-row">
+        <h1>SkyNav לכידה</h1>
+        <span class="chip">no location API</span>
+      </div>
+      <div id="secure">Safari צריך הקשר מאובטח (HTTPS). file:// לא ייתן מצלמה או תנועה. פתחו את העמוד מכתובת HTTPS ואז הוסיפו למסך הבית.</div>
+      <div id="status">מוכנים: הקישו «הפעל מצלמה ותנועה» — iOS מבקש הרשאה רק אחרי הקשה.</div>
+      <div id="note">DeviceMotionEvent.accelerationIncludingGravity · לא CMDeviceMotion.gravity</div>
+    </div>
+    <div id="bottom">
+      <div id="last"></div>
+      <div id="actions">
+        <button id="enable" class="primary" type="button">הפעל מצלמה ותנועה</button>
+        <button id="reshare" type="button" hidden>שתף שוב</button>
+      </div>
+      <div id="shutter-wrap">
+        <button id="shutter" type="button" disabled aria-label="Shutter"></button>
+        <div id="shutter-label">SHUTTER</div>
+      </div>
+    </div>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>
