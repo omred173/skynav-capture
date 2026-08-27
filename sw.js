@@ -1,5 +1,5 @@
-/* SkyNav capture-web — cache this app's static files only. */
-const CACHE = "skynav-capture-web-v5";
+/* SkyNav capture-web v6 — network-first HTML/JS so a refresh cannot stick. */
+const CACHE = "skynav-capture-web-v6";
 const ASSETS = [
   "./",
   "./index.html",
@@ -10,6 +10,12 @@ const ASSETS = [
   "./icon-192.png",
   "./icon-512.png",
 ];
+
+function isShell(req, url) {
+  if (req.destination === "document" || req.destination === "script") return true;
+  var base = url.pathname.split("/").pop();
+  return base === "index.html" || base === "app.js" || base === "";
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -35,6 +41,27 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   if (url.origin !== self.location.origin) return;
+
+  if (isShell(req, url)) {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((cache) => cache.put(req, copy));
+          }
+          return res;
+        })
+        .catch(() =>
+          caches.match(req, { ignoreSearch: true }).then((hit) => {
+            if (hit) return hit;
+            return Promise.reject(new Error("offline"));
+          })
+        )
+    );
+    return;
+  }
+
   event.respondWith(
     caches.match(req, { ignoreSearch: true }).then((hit) => {
       if (hit) return hit;

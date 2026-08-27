@@ -882,6 +882,11 @@
   nightBtn.addEventListener("click", onNightToggle);
 
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./sw.js", { scope: "./" }).catch(function () {});
+    var swOpts = { scope: "./" };
+    if (typeof ServiceWorkerRegistration !== "undefined") swOpts.updateViaCache = "none";
+    navigator.serviceWorker.register("./sw.js", swOpts).catch(function () {});
+    navigator.serviceWorker.getRegistration("./").then(function (reg) {
+      if (reg && typeof reg.update === "function") return reg.update();
+    }).catch(function () {});
   }
 })();

@@ -39,6 +39,16 @@
       </div>
     </div>
   </div>
-  <script src="./app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      var swOpts = { scope: "./" };
+      if (typeof ServiceWorkerRegistration !== "undefined") swOpts.updateViaCache = "none";
+      navigator.serviceWorker.register("./sw.js", swOpts).catch(function () {});
+      navigator.serviceWorker.getRegistration("./").then(function (reg) {
+        if (reg && typeof reg.update === "function") return reg.update();
+      }).catch(function () {});
+    }
+  </script>
+  <script src="./app.js?v=6"></script>
 </body>
 </html>
