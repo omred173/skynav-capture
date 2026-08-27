@@ -5,6 +5,20 @@
   var G = 9.80665;
   var STATIC_G = 0.05;
   var SCHEMA = "skynav.capture.web.v1";
+  var STACK_N = 12;
+  var STACK_MODE = "mean";
+  var NIGHT_CONSTRAINT_KEYS = [
+    "exposureMode",
+    "exposureCompensation",
+    "iso",
+    "exposureTime",
+    "focusMode",
+    "focusDistance",
+    "frameRate",
+    "whiteBalanceMode",
+    "torch",
+    "zoom",
+  ];
 
   var video = document.getElementById("preview");
   var blank = document.getElementById("blank");
@@ -12,8 +26,11 @@
   var secureEl = document.getElementById("secure");
   var enableBtn = document.getElementById("enable");
   var shutterBtn = document.getElementById("shutter");
+  var shutterWrap = document.getElementById("shutter-wrap");
+  var shutterLabel = document.getElementById("shutter-label");
   var lastEl = document.getElementById("last");
   var reshareBtn = document.getElementById("reshare");
+  var nightBtn = document.getElementById("night");
 
   var stream = null;
   var motionOn = false;
@@ -26,6 +43,8 @@
   var lastMotionTs = null;
   var lastPair = null;
   var lastName = "";
+  var nightOn = false;
+  var lastExposureAttempt = null;
 
   function setStatus(text, kind) {
     statusEl.textContent = text;
@@ -72,6 +91,12 @@
     return "skynav_" + iso.replace(/[-:]/g, "").replace(".", "");
   }
 
+  function getTrack() {
+    if (!stream || !stream.getVideoTracks) return null;
+    var tracks = stream.getVideoTracks();
+    return tracks && tracks.length ? tracks[0] : null;
+  }
+
   function onMotion(ev) {
     var aig = vec3(ev.accelerationIncludingGravity);
     var acc = vec3(ev.acceleration);
@@ -106,6 +131,7 @@
         : "";
     }
     if (lastUserMagG != null) imuLine += " · |a| " + lastUserMagG.toFixed(3) + " g";
+    if (nightOn) imuLine += " · לילה ×" + STACK_N;
     setStatus(imuLine, lastStatic === false ? "warn" : "");
   }
 
@@ -120,21 +146,172 @@
     window.addEventListener("devicemotion", onMotion, { passive: true });
   }
 
+  function videoConstraints() {
+    var c = {
+      facingMode: { ideal: "environment" },
+      width: { ideal: 1920 },
+      height: { ideal: 1440 },
+    };
+    if (nightOn) c.frameRate = { ideal: 10, max: 24 };
+    return c;
+  }
+
   async function requestCamera() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error("getUserMedia missing");
     }
     stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1920 },
-        height: { ideal: 1440 },
-      },
+      video: videoConstraints(),
     });
     video.srcObject = stream;
     await video.play();
     blank.classList.add("hidden");
+    if (nightOn) await applyNightConstraints();
+  }
+
+  function supportedConstraints() {
+    try {
+      if (navigator.mediaDevices && typeof navigator.mediaDevices.getSupportedConstraints === "function") {
+        return navigator.mediaDevices.getSupportedConstraints() || {};
+      }
+    } catch (err) {}
+    return {};
+  }
+
+  function pickCap(caps, key, fallback) {
+    var c = caps && caps[key];
+    if (!c || typeof c !== "object") return fallback;
+    if (typeof c.max === "number" && isFinite(c.max)) return c.max;
+    return fallback;
+  }
+
+  function stampConstraintSubset(src) {
+    var out = {};
+    if (!src) return out;
+    for (var i = 0; i < NIGHT_CONSTRAINT_KEYS.length; i++) {
+      var k = NIGHT_CONSTRAINT_KEYS[i];
+      if (Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
+    }
+    return out;
+  }
+
+  async function applyNightConstraints() {
+    var report = {
+      requested: false,
+      supported: {},
+      capabilities: {},
+      attempted: {},
+      applied: null,
+      error: null,
+      torch: false,
+      note: "WebKit IDL still FIXMEs exposureMode/exposureCompensation/iso/exposureTime/focusMode; attempted as ideal/advanced. Never torch.",
+    };
+    var supported = supportedConstraints();
+    var supportedNight = {};
+    for (var i = 0; i < NIGHT_CONSTRAINT_KEYS.length; i++) {
+      var k = NIGHT_CONSTRAINT_KEYS[i];
+      if (supported[k]) supportedNight[k] = true;
+    }
+    report.supported = supportedNight;
+
+    var track = getTrack();
+    if (!track) {
+      report.error = "no_track";
+      lastExposureAttempt = report;
+      return report;
+    }
+
+    var caps = {};
+    if (typeof track.getCapabilities === "function") {
+      try {
+        caps = track.getCapabilities() || {};
+      } catch (err) {}
+    }
+    report.capabilities = stampConstraintSubset(caps);
+
+    var attempted = {};
+    if (supported.torch || Object.prototype.hasOwnProperty.call(caps, "torch")) attempted.torch = false;
+    if (supported.exposureMode || caps.exposureMode) attempted.exposureMode = "manual";
+    if (supported.exposureCompensation || caps.exposureCompensation) {
+      attempted.exposureCompensation = pickCap(caps, "exposureCompensation", 2);
+    }
+    if (supported.iso || caps.iso) {
+      var isoMax = pickCap(caps, "iso", 1600);
+      attempted.iso = Math.min(isoMax, 3200);
+    }
+    if (supported.exposureTime || caps.exposureTime) {
+      attempted.exposureTime = pickCap(caps, "exposureTime", 667);
+    }
+    if (supported.focusMode || caps.focusMode) attempted.focusMode = "manual";
+    if (supported.focusDistance || caps.focusDistance) {
+      var fd = pickCap(caps, "focusDistance", null);
+      if (fd != null) attempted.focusDistance = fd;
+    }
+    if (supported.frameRate || caps.frameRate) attempted.frameRate = 10;
+
+    report.attempted = attempted;
+    report.requested = Object.keys(attempted).length > 0;
+
+    if (report.requested && typeof track.applyConstraints === "function") {
+      try {
+        await track.applyConstraints({ advanced: [attempted] });
+      } catch (err1) {
+        try {
+          await track.applyConstraints(attempted);
+        } catch (err2) {
+          report.error = String(err2 && err2.message ? err2.message : err2);
+        }
+      }
+    }
+
+    if (typeof track.getSettings === "function") {
+      try {
+        report.applied = stampConstraintSubset(track.getSettings() || {});
+      } catch (err) {}
+    }
+
+    lastExposureAttempt = report;
+    return report;
+  }
+
+  async function applyDayConstraints() {
+    var track = getTrack();
+    if (!track || typeof track.applyConstraints !== "function") return;
+    try {
+      await track.applyConstraints({ frameRate: { ideal: 30 } });
+    } catch (err) {}
+  }
+
+  function setNight(on) {
+    nightOn = !!on;
+    nightBtn.setAttribute("aria-pressed", nightOn ? "true" : "false");
+    shutterWrap.classList.toggle("night", nightOn);
+    shutterLabel.textContent = nightOn ? "NIGHT ×" + STACK_N : "SHUTTER";
+  }
+
+  async function onNightToggle() {
+    setNight(!nightOn);
+    if (!stream) {
+      setStatus(nightOn ? "לילה: ייחסן " + STACK_N + " פריימים אחרי הפעלת מצלמה." : "מצב יום.", "");
+      return;
+    }
+    try {
+      if (nightOn) {
+        setStatus("לילה: מנסה חשיפה…", "");
+        var report = await applyNightConstraints();
+        var keys = Object.keys(report.supported);
+        setStatus(
+          "לילה ×" + STACK_N + " mean. iOS supported: " + (keys.length ? keys.join(", ") : "none of the night keys") + ".",
+          ""
+        );
+      } else {
+        await applyDayConstraints();
+        setStatus("מצב יום.", "");
+      }
+    } catch (err) {
+      setStatus("Night constraints: " + (err && err.message ? err.message : err), "warn");
+    }
   }
 
   async function enableSensors() {
@@ -149,15 +326,19 @@
       await requestCamera();
       shutterBtn.disabled = false;
       enableBtn.hidden = true;
-      setStatus("Camera on. Hold still, then shutter.", "");
+      setStatus(
+        nightOn ? "Camera on. לילה ×" + STACK_N + ". Hold still, then shutter." : "Camera on. Hold still, then shutter.",
+        ""
+      );
     } catch (err) {
       enableBtn.disabled = false;
       setStatus("Permission failed: " + (err && err.message ? err.message : err), "bad");
     }
   }
 
-  function buildSidecar(iso, stem, filename) {
-    var raw = lastStaticAig || lastAig;
+  function buildSidecar(iso, stem, filename, extra) {
+    extra = extra || {};
+    var raw = extra.gravity || lastStaticAig || lastAig;
     var gravity = raw ? copy(raw) : null;
     var ghat = gravity ? norm(gravity) : null;
     var body = {
@@ -172,7 +353,7 @@
       sidecar_stem: stem,
       lens: "browser_environment",
       codec: "image/jpeg",
-      image_source: "canvas_from_video",
+      image_source: extra.image_source || "canvas_from_video",
       gravity_units: "m/s2",
       static_threshold_g: STATIC_G,
     };
@@ -195,6 +376,24 @@
     var ang = screenAngle();
     if (ang != null) body.screen_orientation_deg = ang;
     stampCamera(body);
+    if (extra.night) {
+      body.night = true;
+      body.stack_n = extra.stack_n;
+      body.stack_mode = extra.stack_mode;
+      body.torch = false;
+      if (lastExposureAttempt) {
+        body.exposure_attempted = lastExposureAttempt.attempted;
+        body.exposure_supported = lastExposureAttempt.supported;
+        if (lastExposureAttempt.capabilities && Object.keys(lastExposureAttempt.capabilities).length) {
+          body.exposure_capabilities = lastExposureAttempt.capabilities;
+        }
+        if (lastExposureAttempt.applied) body.exposure_applied = lastExposureAttempt.applied;
+        if (lastExposureAttempt.error) body.exposure_error = lastExposureAttempt.error;
+        if (lastExposureAttempt.note) body.exposure_note = lastExposureAttempt.note;
+      } else {
+        body.exposure_attempted = {};
+      }
+    }
     return body;
   }
 
@@ -209,11 +408,7 @@
   function stampCamera(body) {
     if (video && video.videoWidth) body.videoWidth = video.videoWidth;
     if (video && video.videoHeight) body.videoHeight = video.videoHeight;
-    var track = null;
-    if (stream && stream.getVideoTracks) {
-      var tracks = stream.getVideoTracks();
-      if (tracks && tracks.length) track = tracks[0];
-    }
+    var track = getTrack();
     if (!track || typeof track.getSettings !== "function") return;
     var s;
     try {
@@ -227,9 +422,35 @@
     if (typeof s.facingMode === "string" && s.facingMode) settings.facingMode = s.facingMode;
     if (typeof s.aspectRatio === "number" && isFinite(s.aspectRatio)) settings.aspectRatio = s.aspectRatio;
     if (typeof s.zoom === "number" && isFinite(s.zoom)) settings.zoom = s.zoom;
+    if (typeof s.frameRate === "number" && isFinite(s.frameRate)) settings.frameRate = s.frameRate;
     var hid = hashDeviceId(s.deviceId);
     if (hid) settings.deviceId_hash = hid;
     body.mediaTrackSettings = settings;
+  }
+
+  function nextVideoFrame() {
+    return new Promise(function (resolve) {
+      if (video && typeof video.requestVideoFrameCallback === "function") {
+        video.requestVideoFrameCallback(function () {
+          resolve();
+        });
+        return;
+      }
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          resolve();
+        });
+      });
+    });
+  }
+
+  function canvasToJpeg(canvas) {
+    return new Promise(function (resolve, reject) {
+      canvas.toBlob(function (blob) {
+        if (!blob) reject(new Error("jpeg failed"));
+        else resolve(blob);
+      }, "image/jpeg", 0.92);
+    });
   }
 
   function canvasBlob() {
@@ -241,12 +462,54 @@
     canvas.height = h;
     var ctx = canvas.getContext("2d");
     ctx.drawImage(video, 0, 0, w, h);
-    return new Promise(function (resolve, reject) {
-      canvas.toBlob(function (blob) {
-        if (!blob) reject(new Error("jpeg failed"));
-        else resolve(blob);
-      }, "image/jpeg", 0.92);
-    });
+    return canvasToJpeg(canvas);
+  }
+
+  async function stackCanvasBlob(n, mode) {
+    var w = video.videoWidth;
+    var h = video.videoHeight;
+    if (!w || !h) throw new Error("preview not ready");
+    var canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    var ctx = canvas.getContext("2d", { willReadFrequently: true });
+    var npx = w * h * 4;
+    var acc = mode === "max" ? new Uint8ClampedArray(npx) : new Float32Array(npx);
+    var got = 0;
+    for (var i = 0; i < n; i++) {
+      await nextVideoFrame();
+      ctx.drawImage(video, 0, 0, w, h);
+      var img = ctx.getImageData(0, 0, w, h);
+      var src = img.data;
+      var p;
+      if (mode === "max") {
+        if (i === 0) acc.set(src);
+        else {
+          for (p = 0; p < npx; p += 4) {
+            if (src[p] > acc[p]) acc[p] = src[p];
+            if (src[p + 1] > acc[p + 1]) acc[p + 1] = src[p + 1];
+            if (src[p + 2] > acc[p + 2]) acc[p + 2] = src[p + 2];
+            acc[p + 3] = 255;
+          }
+        }
+      } else if (i === 0) {
+        for (p = 0; p < npx; p++) acc[p] = src[p];
+      } else {
+        for (p = 0; p < npx; p++) acc[p] += src[p];
+      }
+      got++;
+      setStatus("לילה " + got + "/" + n, "");
+    }
+    var out = ctx.createImageData(w, h);
+    var dst = out.data;
+    if (mode === "max") {
+      dst.set(acc);
+    } else {
+      for (p = 0; p < npx; p++) dst[p] = Math.round(acc[p] / got);
+      for (p = 3; p < npx; p += 4) dst[p] = 255;
+    }
+    ctx.putImageData(out, 0, 0);
+    return canvasToJpeg(canvas);
   }
 
   var CRC_TABLE = (function () {
@@ -261,7 +524,7 @@
 
   function crc32(bytes) {
     var c = 0xffffffff;
-    for (var i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    for (var i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 255] ^ (c >>> 8);
     return (c ^ 0xffffffff) >>> 0;
   }
 
@@ -382,8 +645,21 @@
       var stem = stemFromUtc(iso);
       var jpgName = stem + ".jpg";
       var jsonName = stem + ".json";
-      var jpeg = await canvasBlob();
-      var sidecar = buildSidecar(iso, stem, jpgName);
+      var gravitySnap = lastStaticAig ? copy(lastStaticAig) : (lastAig ? copy(lastAig) : null);
+      var jpeg;
+      var extra = {};
+      if (nightOn) {
+        await applyNightConstraints();
+        jpeg = await stackCanvasBlob(STACK_N, STACK_MODE);
+        extra.night = true;
+        extra.stack_n = STACK_N;
+        extra.stack_mode = STACK_MODE;
+        extra.image_source = "canvas_from_video_stack";
+        extra.gravity = gravitySnap;
+      } else {
+        jpeg = await canvasBlob();
+      }
+      var sidecar = buildSidecar(iso, stem, jpgName, extra);
       var jpg = new File([jpeg], jpgName, { type: "image/jpeg" });
       var json = new File([JSON.stringify(sidecar, null, 2)], jsonName, { type: "application/json" });
       var zip = await pairZip(jpg, json, stem);
@@ -393,7 +669,9 @@
       reshareBtn.hidden = false;
       await shareOrDownload(zip);
       setStatus(
-        (sidecar.static === false ? "Saved (not static). " : "Saved. ") + lastName,
+        (sidecar.static === false ? "Saved (not static). " : "Saved. ") +
+          (sidecar.stack_n ? "stack " + sidecar.stack_n + " " + sidecar.stack_mode + ". " : "") +
+          lastName,
         sidecar.static === false ? "warn" : ""
       );
     } catch (err) {
@@ -415,6 +693,7 @@
   enableBtn.addEventListener("click", enableSensors);
   shutterBtn.addEventListener("click", onShutter);
   reshareBtn.addEventListener("click", onReshare);
+  nightBtn.addEventListener("click", onNightToggle);
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js", { scope: "./" }).catch(function () {});

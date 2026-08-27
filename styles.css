@@ -178,3 +178,13 @@ button:disabled { opacity: 0.45; }
   line-height: 1.4;
 }
 #secure.show { display: block; }
+
+#night[aria-pressed="true"] {
+  background: #243018;
+  color: #d4ecc0;
+  box-shadow: inset 0 0 0 1.5px #7aa04a;
+}
+#shutter-wrap.night #shutter {
+  box-shadow: 0 0 0 8px rgba(180, 210, 120, 0.35);
+}
+#shutter-wrap.night #shutter-label { color: #d4ecc0; }
