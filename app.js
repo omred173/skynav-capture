@@ -214,6 +214,104 @@
     });
   }
 
+  var CRC_TABLE = (function () {
+    var t = new Uint32Array(256);
+    for (var i = 0; i < 256; i++) {
+      var c = i;
+      for (var k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      t[i] = c >>> 0;
+    }
+    return t;
+  })();
+
+  function crc32(bytes) {
+    var c = 0xffffffff;
+    for (var i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+
+  function u16(n) { return new Uint8Array([n & 255, (n >>> 8) & 255]); }
+  function u32(n) {
+    return new Uint8Array([n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255]);
+  }
+
+  function zipStore(entries) {
+    var local = [];
+    var central = [];
+    var offset = 0;
+    for (var i = 0; i < entries.length; i++) {
+      var name = new TextEncoder().encode(entries[i].name);
+      var data = entries[i].data;
+      var crc = crc32(data);
+      var lh = new Uint8Array(30 + name.length + data.length);
+      lh.set([0x50, 0x4b, 0x03, 0x04], 0);
+      lh.set(u16(20), 4);
+      lh.set(u16(0), 6);
+      lh.set(u16(0), 8);
+      lh.set(u16(0), 10);
+      lh.set(u16(0), 12);
+      lh.set(u32(crc), 14);
+      lh.set(u32(data.length), 18);
+      lh.set(u32(data.length), 22);
+      lh.set(u16(name.length), 26);
+      lh.set(u16(0), 28);
+      lh.set(name, 30);
+      lh.set(data, 30 + name.length);
+      local.push(lh);
+      var ch = new Uint8Array(46 + name.length);
+      ch.set([0x50, 0x4b, 0x01, 0x02], 0);
+      ch.set(u16(20), 4);
+      ch.set(u16(20), 6);
+      ch.set(u16(0), 8);
+      ch.set(u16(0), 10);
+      ch.set(u16(0), 12);
+      ch.set(u16(0), 14);
+      ch.set(u32(crc), 16);
+      ch.set(u32(data.length), 20);
+      ch.set(u32(data.length), 24);
+      ch.set(u16(name.length), 28);
+      ch.set(u16(0), 30);
+      ch.set(u16(0), 32);
+      ch.set(u16(0), 34);
+      ch.set(u16(0), 36);
+      ch.set(u32(0), 38);
+      ch.set(u32(offset), 42);
+      ch.set(name, 46);
+      central.push(ch);
+      offset += lh.length;
+    }
+    var centralSize = central.reduce(function (s, x) { return s + x.length; }, 0);
+    var end = new Uint8Array(22);
+    end.set([0x50, 0x4b, 0x05, 0x06], 0);
+    end.set(u16(0), 4);
+    end.set(u16(0), 6);
+    end.set(u16(entries.length), 8);
+    end.set(u16(entries.length), 10);
+    end.set(u32(centralSize), 12);
+    end.set(u32(offset), 16);
+    end.set(u16(0), 20);
+    var total = offset + centralSize + 22;
+    var out = new Uint8Array(total);
+    var p = 0;
+    for (i = 0; i < local.length; i++) { out.set(local[i], p); p += local[i].length; }
+    for (i = 0; i < central.length; i++) { out.set(central[i], p); p += central[i].length; }
+    out.set(end, p);
+    return out;
+  }
+
+  async function fileBytes(file) {
+    var buf = await file.arrayBuffer();
+    return new Uint8Array(buf);
+  }
+
+  async function pairZip(jpg, json, stem) {
+    var bytes = zipStore([
+      { name: jpg.name, data: await fileBytes(jpg) },
+      { name: json.name, data: await fileBytes(json) },
+    ]);
+    return new File([bytes], stem + ".zip", { type: "application/zip" });
+  }
+
   function downloadFile(file) {
     var url = URL.createObjectURL(file);
     var a = document.createElement("a");
@@ -227,20 +325,19 @@
     }, 4000);
   }
 
-  async function shareOrDownload(jpg, json) {
-    var files = [jpg, json];
+  async function shareOrDownload(zip) {
+    var files = [zip];
     if (navigator.canShare) {
       try {
         if (navigator.canShare({ files: files })) {
-          await navigator.share({ files: files, title: jpg.name });
+          await navigator.share({ files: files, title: zip.name });
           return;
         }
       } catch (err) {
         if (err && err.name === "AbortError") return;
       }
     }
-    downloadFile(jpg);
-    downloadFile(json);
+    downloadFile(zip);
   }
 
   async function onShutter() {
@@ -254,11 +351,12 @@
       var sidecar = buildSidecar(iso, stem, jpgName);
       var jpg = new File([jpeg], jpgName, { type: "image/jpeg" });
       var json = new File([JSON.stringify(sidecar, null, 2)], jsonName, { type: "application/json" });
-      lastPair = { jpg: jpg, json: json };
-      lastName = jpgName;
-      lastEl.textContent = lastName;
+      var zip = await pairZip(jpg, json, stem);
+      lastPair = { zip: zip };
+      lastName = zip.name;
+      lastEl.textContent = lastName + " — שלח את ה-zip לצ'אט, לא את התמונה";
       reshareBtn.hidden = false;
-      await shareOrDownload(jpg, json);
+      await shareOrDownload(zip);
       setStatus(
         (sidecar.static === false ? "Saved (not static). " : "Saved. ") + lastName,
         sidecar.static === false ? "warn" : ""
@@ -272,7 +370,7 @@
 
   function onReshare() {
     if (!lastPair) return;
-    shareOrDownload(lastPair.jpg, lastPair.json).catch(function (err) {
+    shareOrDownload(lastPair.zip).catch(function (err) {
       setStatus("Share failed: " + (err && err.message ? err.message : err), "bad");
     });
   }
