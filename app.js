@@ -4,8 +4,7 @@
 
   var G = 9.80665;
   var STATIC_G = 0.05;
-  // Assumed. Fail-closed: |ω| above this is not static. See kb/field/STATIC_OMEGA.md
-  var STATIC_OMEGA_DEG_S = 1.0;
+  // Handheld product. |ω| is stamped and shown; it does not reject a shot.
   var SCHEMA = "skynav.capture.web.v1";
   var STACK_N = 12;
   var STACK_MODE = "mean";
@@ -82,10 +81,9 @@
     return Math.sqrt(a * a + b * b + g * g);
   }
 
-  function isStaticSample(userMagG, omegaDegS) {
+  function isHandheldHold(userMagG) {
+    // Acc gate only: walking vs handheld. Gyro never rejects.
     if (userMagG == null || !isFinite(userMagG) || userMagG > STATIC_G) return false;
-    // Fail-closed on the live page if gyro is missing this sample.
-    if (omegaDegS == null || !isFinite(omegaDegS) || omegaDegS > STATIC_OMEGA_DEG_S) return false;
     return true;
   }
 
@@ -138,7 +136,7 @@
     if (acc) {
       lastUser = copy(acc);
       lastUserMagG = mag(acc) / G;
-      lastStatic = isStaticSample(lastUserMagG, omegaMagDegS(lastRate));
+      lastStatic = isHandheldHold(lastUserMagG);
       if (lastStatic && aig) lastStaticAig = copy(aig);
     } else {
       lastUser = null;
@@ -147,7 +145,7 @@
     }
     lastMotionTs = typeof ev.timeStamp === "number" ? ev.timeStamp : null;
     motionOn = true;
-    var imuLine = lastStatic === false ? "IMU: not static" : "IMU: ready";
+    var imuLine = lastStatic === false ? "IMU: moving" : "IMU: handheld";
     if (lastAig) {
       var nn = norm(lastAig);
       imuLine += nn
@@ -549,7 +547,7 @@
       image_source: extra.image_source || "canvas_from_video",
       gravity_units: "m/s2",
       static_threshold_g: STATIC_G,
-      static_threshold_omega_deg_s: STATIC_OMEGA_DEG_S,
+      hold: "handheld",
     };
     if (gravity) {
       body.gravity = gravity;
@@ -879,7 +877,7 @@
       reshareBtn.hidden = false;
       await shareOrDownload(zip);
       setStatus(
-        (sidecar.static === false ? "Saved (not static). " : "Saved. ") +
+        (sidecar.static === false ? "Saved (moving). " : "Saved (handheld). ") +
           (sidecar.stack_n ? "stack " + sidecar.stack_n + " " + sidecar.stack_mode + ". " : "") +
           lastName,
         sidecar.static === false ? "warn" : ""
