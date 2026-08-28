@@ -1,5 +1,5 @@
-/* SkyNav capture-web v7 — network-first HTML/JS so a refresh cannot stick. */
-const CACHE = "skynav-capture-web-v7";
+/* SkyNav capture-web v8 — network-first HTML/JS so a refresh cannot stick. */
+const CACHE = "skynav-capture-web-v8";
 const ASSETS = [
   "./",
   "./index.html",
