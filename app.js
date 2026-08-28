@@ -4,6 +4,8 @@
 
   var G = 9.80665;
   var STATIC_G = 0.05;
+  // Assumed. Fail-closed: |ω| above this is not static. See kb/field/STATIC_OMEGA.md
+  var STATIC_OMEGA_DEG_S = 1.0;
   var SCHEMA = "skynav.capture.web.v1";
   var STACK_N = 12;
   var STACK_MODE = "mean";
@@ -70,6 +72,23 @@
     return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
   }
 
+  function omegaMagDegS(rate) {
+    if (!rate) return null;
+    var a = rate.alpha;
+    var b = rate.beta;
+    var g = rate.gamma;
+    if (typeof a !== "number" || typeof b !== "number" || typeof g !== "number") return null;
+    if (!isFinite(a) || !isFinite(b) || !isFinite(g)) return null;
+    return Math.sqrt(a * a + b * b + g * g);
+  }
+
+  function isStaticSample(userMagG, omegaDegS) {
+    if (userMagG == null || !isFinite(userMagG) || userMagG > STATIC_G) return false;
+    // Fail-closed on the live page if gyro is missing this sample.
+    if (omegaDegS == null || !isFinite(omegaDegS) || omegaDegS > STATIC_OMEGA_DEG_S) return false;
+    return true;
+  }
+
   function norm(v) {
     var n = mag(v);
     if (!(n > 1e-9)) return null;
@@ -114,18 +133,18 @@
         rate = { alpha: a, beta: b, gamma: g };
       }
     }
+    if (rate) lastRate = rate;
     if (aig) lastAig = copy(aig);
     if (acc) {
       lastUser = copy(acc);
       lastUserMagG = mag(acc) / G;
-      lastStatic = lastUserMagG <= STATIC_G;
+      lastStatic = isStaticSample(lastUserMagG, omegaMagDegS(lastRate));
       if (lastStatic && aig) lastStaticAig = copy(aig);
     } else {
       lastUser = null;
       lastUserMagG = null;
       lastStatic = null;
     }
-    if (rate) lastRate = rate;
     lastMotionTs = typeof ev.timeStamp === "number" ? ev.timeStamp : null;
     motionOn = true;
     var imuLine = lastStatic === false ? "IMU: not static" : "IMU: ready";
@@ -136,6 +155,8 @@
         : "";
     }
     if (lastUserMagG != null) imuLine += " · |a| " + lastUserMagG.toFixed(3) + " g";
+    var omShow = omegaMagDegS(lastRate);
+    if (omShow != null) imuLine += " · |ω| " + omShow.toFixed(2) + " °/s";
     if (nightOn) imuLine += " · לילה ×" + STACK_N;
     setStatus(imuLine, lastStatic === false ? "warn" : "");
   }
@@ -528,6 +549,7 @@
       image_source: extra.image_source || "canvas_from_video",
       gravity_units: "m/s2",
       static_threshold_g: STATIC_G,
+      static_threshold_omega_deg_s: STATIC_OMEGA_DEG_S,
     };
     if (gravity) {
       body.gravity = gravity;
@@ -543,6 +565,8 @@
     if (lastRate) {
       body.rotationRate = lastRate;
       body.rotationRate_units = "deg/s";
+      var omStamp = omegaMagDegS(lastRate);
+      if (omStamp != null) body.rotationRate_magnitude_deg_s = omStamp;
     }
     if (lastMotionTs != null) body.timestamp_motion = lastMotionTs;
     var ang = screenAngle();
